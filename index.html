@@ -415,7 +415,7 @@
 const STEPS = [
   {
     id: 1,
-    name: "Loan Officer Introduction",
+    name: "*Loan Officer Introduction",
     lines: [
       "Hi {member}, I'm {lo}, a loan officer with New American Funding, licensed in {state} — how are you doing today?"
     ]
@@ -555,28 +555,39 @@ function initFields() {
   });
 }
 
-// ── URL STATE PERSISTENCE ──
-// Saves current step + completed steps into the URL so page reloads
-// (e.g. Genesys switching conversations) restore exactly where LO left off.
-function saveStateToURL() {
-  const params = new URLSearchParams(window.location.search);
-  params.set('_step', currentStep);
-  params.set('_done', Array.from(completedSteps).join(','));
-  history.replaceState(null, '', '?' + params.toString());
+// ── LOCAL STORAGE STATE PERSISTENCE ──
+// localStorage survives Genesys iframe reloads because it persists in the
+// browser itself — Genesys can't wipe it by rebuilding the URL.
+// Key includes the conversation ID (if passed) so each chat gets its own state.
+function getStorageKey() {
+  const convId = getQP('conversationId', 'CONV_ID', 'convId', 'interactionId') || 'naf-lo-default';
+  return 'naf_workflow_' + convId;
+}
+
+function saveState() {
+  try {
+    const state = {
+      step: currentStep,
+      done: Array.from(completedSteps),
+      ts:   Date.now()
+    };
+    localStorage.setItem(getStorageKey(), JSON.stringify(state));
+  } catch(e) { /* storage unavailable — fail silently */ }
 }
 
 function restoreStateFromURL() {
-  const step = qp.get('_step');
-  const done = qp.get('_done');
-  if (step !== null && !isNaN(parseInt(step))) {
-    currentStep = parseInt(step);
-  }
-  if (done && done.trim() !== '') {
-    done.split(',').forEach(n => {
-      const i = parseInt(n);
-      if (!isNaN(i)) completedSteps.add(i);
-    });
-  }
+  try {
+    const raw = localStorage.getItem(getStorageKey());
+    if (!raw) return;
+    const state = JSON.parse(raw);
+    // Only restore if saved within the last 8 hours (a workday)
+    if (Date.now() - state.ts > 8 * 60 * 60 * 1000) {
+      localStorage.removeItem(getStorageKey());
+      return;
+    }
+    if (!isNaN(parseInt(state.step))) currentStep = parseInt(state.step);
+    if (Array.isArray(state.done)) state.done.forEach(i => completedSteps.add(i));
+  } catch(e) { /* corrupted state — start fresh */ }
 }
 
 let currentStep = 0; // 0-indexed active step
@@ -657,13 +668,13 @@ function handleHeaderClick(idx) {
   if (idx === currentStep && !completedSteps.has(idx)) return;
   // Otherwise re-open that step
   currentStep = idx;
-  saveStateToURL();
+  saveState();
   buildSteps();
 }
 
 function markDone(idx) {
   completedSteps.add(idx);
-  saveStateToURL();
+  saveState();
   // Advance to next incomplete step
   let next = idx + 1;
   while (next < STEPS.length && completedSteps.has(next)) next++;
@@ -678,7 +689,7 @@ function markDone(idx) {
 function skipStep(idx) {
   // Mark as skipped — move forward without adding to completed
   currentStep = Math.min(idx + 1, STEPS.length - 1);
-  saveStateToURL();
+  saveState();
   buildSteps();
   showToast('Step skipped');
 }
@@ -686,7 +697,7 @@ function skipStep(idx) {
 function goBack(idx) {
   currentStep = Math.max(idx - 1, 0);
   completedSteps.delete(idx - 1);
-  saveStateToURL();
+  saveState();
   buildSteps();
 }
 
@@ -744,6 +755,7 @@ function scrollToActive() {
 function resetAll() {
   completedSteps.clear();
   currentStep = 0;
+  try { localStorage.removeItem(getStorageKey()); } catch(e) {}
   document.getElementById('completeBanner').style.display = 'none';
   buildSteps();
   showToast('Workflow reset');
@@ -763,7 +775,7 @@ function showToast(msg) {
   document.getElementById(id).addEventListener('input', () => buildSteps());
 });
 
-// Init — populate fields from URL params or defaults, restore step state, then render
+// Init — populate fields, restore step state from localStorage, then render
 initFields();
 restoreStateFromURL();
 buildSteps();
